@@ -1,4 +1,12 @@
+import os
+
+import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = pytest.mark.skipif(
+    not os.getenv("DATABASE_URL"),
+    reason="Postgres tests require DATABASE_URL and a running Docker Compose database.",
+)
 
 from main import app
 

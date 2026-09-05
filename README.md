@@ -1,19 +1,20 @@
 # Task API
 
-A SQLite-backed CRUD API for a to-do list, built with FastAPI. It continues the Week 2 API without changing its CRUD contract; only the storage layer has changed from an in-memory list to a database.
+A containerized FastAPI CRUD API backed by PostgreSQL. The API keeps the same endpoints introduced in Weeks 2 and 3; only the storage layer has changed, from memory to SQLite and now to Postgres.
 
 ## Run it
 
-Requires Python 3.10+.
+Requires Docker Desktop. Copy `.env.example` to `.env`, then start the complete API and database stack with one command:
 
 ```bash
-python -m pip install -r requirements.txt
-python -m uvicorn main:app --reload
+docker compose up --build
 ```
 
 Open [http://localhost:8000/docs](http://localhost:8000/docs) to use the generated Swagger UI. Use **Try it out** to run the full create, read, update, and delete cycle.
 
-On the first start, the application creates `tasks.db`, creates the `tasks` table, and seeds three example tasks. SQLite was chosen because it is a single portable file, requires no separate database server or setup, and preserves data across server restarts. `tasks.db` is git-ignored so each clone starts fresh and creates its own database automatically.
+The API is available at `http://localhost:8000`, with Swagger UI at `http://localhost:8000/docs`. The `db` service runs Postgres, and the `taskdata` Docker volume preserves rows across `docker compose down` and `docker compose up`.
+
+`.env` holds the database password and is deliberately git-ignored. `.env.example` documents the required variables without committing a real secret.
 
 ## Endpoints
 
@@ -47,19 +48,19 @@ content-type: application/json
 python -m pytest -q
 ```
 
-## SQLite query example
+## Postgres query example
 
-Open `tasks.db` in DB Browser for SQLite and run:
+With the stack running, inspect the database directly:
 
-```sql
-SELECT * FROM tasks WHERE done = 1;
+```bash
+docker compose exec db psql -U postgres -d tasks -c "SELECT * FROM tasks WHERE done = true;"
 ```
 
-This returns every completed task. Because the API and DB Browser access the same `tasks.db` file, manual changes are reflected by the API immediately.
+This returns every completed task. The API and `psql` access the same Postgres database, so manual changes are reflected by the API immediately.
 
 ## Persistence check
 
-Create a task, stop the server, then run the same startup command again. `GET /tasks` still includes the task because it was inserted into SQLite instead of stored in application memory.
+Create a task, run `docker compose down`, then run `docker compose up` again. `GET /tasks` still includes the task because the Docker volume preserves the Postgres data.
 
 ## AI vs me (bonus)
 
