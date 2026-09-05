@@ -1,6 +1,6 @@
 # Task API
 
-A small in-memory CRUD API for a to-do list, built with FastAPI. Data resets whenever the server restarts; this is intentional for this assignment.
+A SQLite-backed CRUD API for a to-do list, built with FastAPI. It continues the Week 2 API without changing its CRUD contract; only the storage layer has changed from an in-memory list to a database.
 
 ## Run it
 
@@ -12,6 +12,8 @@ python -m uvicorn main:app --reload
 ```
 
 Open [http://localhost:8000/docs](http://localhost:8000/docs) to use the generated Swagger UI. Use **Try it out** to run the full create, read, update, and delete cycle.
+
+On the first start, the application creates `tasks.db`, creates the `tasks` table, and seeds three example tasks. SQLite was chosen because it is a single portable file, requires no separate database server or setup, and preserves data across server restarts. `tasks.db` is git-ignored so each clone starts fresh and creates its own database automatically.
 
 ## Endpoints
 
@@ -45,9 +47,19 @@ content-type: application/json
 python -m pytest -q
 ```
 
-## Swagger UI screenshot
+## SQLite query example
 
-Start the API and open `/docs`. The generated Swagger UI documents every endpoint and provides an interactive **Try it out** workflow.
+Open `tasks.db` in DB Browser for SQLite and run:
+
+```sql
+SELECT * FROM tasks WHERE done = 1;
+```
+
+This returns every completed task. Because the API and DB Browser access the same `tasks.db` file, manual changes are reflected by the API immediately.
+
+## Persistence check
+
+Create a task, stop the server, then run the same startup command again. `GET /tasks` still includes the task because it was inserted into SQLite instead of stored in application memory.
 
 ## AI vs me (bonus)
 

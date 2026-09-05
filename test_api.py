@@ -42,3 +42,10 @@ def test_update_delete_and_extras() -> None:
     assert client.get("/stats").json() == {"total": 3, "done": 2, "open": 1}
     assert client.delete("/tasks/2").status_code == 204
     assert client.delete("/tasks/99").status_code == 404
+
+
+def test_task_is_persisted_to_sqlite() -> None:
+    created = client.post("/tasks", json={"title": "Persist me"}).json()
+    response = client.get(f"/tasks/{created['id']}")
+    assert response.status_code == 200
+    assert response.json()["title"] == "Persist me"

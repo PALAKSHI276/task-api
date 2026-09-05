@@ -1,6 +1,9 @@
-"""A small in-memory CRUD API for managing to-do tasks."""
+"""A SQLite-backed CRUD API for managing to-do tasks."""
 
-from typing import Annotated
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Annotated, Iterator
 
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -8,10 +11,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
+DATABASE_PATH = Path(__file__).with_name("tasks.db")
+SEED_TASKS = [
+    ("Learn SQLite", 1),
+    ("Connect the CRUD API", 0),
+    ("Verify persistence", 0),
+]
+
 app = FastAPI(
     title="Task API",
     version="1.0",
-    description="A small in-memory CRUD API for a to-do list.",
+    description="A small SQLite-backed CRUD API for a to-do list.",
 )
 
 
@@ -62,14 +72,6 @@ class TaskUpdate(BaseModel):
         return self
 
 
-SEED_TASKS = [
-    Task(id=1, title="Learn FastAPI", done=True),
-    Task(id=2, title="Build a CRUD API", done=False),
-    Task(id=3, title="Test it in Swagger UI", done=False),
-]
-tasks: list[Task] = [task.model_copy() for task in SEED_TASKS]
-
-
 class TaskNotFoundError(Exception):
     """Raised when a requested task ID does not exist."""
 
@@ -77,11 +79,59 @@ class TaskNotFoundError(Exception):
         self.task_id = task_id
 
 
+@contextmanager
+def database() -> Iterator[sqlite3.Connection]:
+    """Open a short-lived connection for each database operation."""
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        yield connection
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def task_from_row(row: sqlite3.Row) -> Task:
+    return Task(id=row["id"], title=row["title"], done=bool(row["done"]))
+
+
+def initialise_database() -> None:
+    """Create the schema and add example tasks only when the table is empty."""
+    with database() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                done INTEGER NOT NULL CHECK (done IN (0, 1))
+            )
+            """
+        )
+        task_count = connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        if task_count == 0:
+            connection.executemany(
+                "INSERT INTO tasks (title, done) VALUES (?, ?)", SEED_TASKS
+            )
+
+
+# Create the database for imports and command-line tools as well as server startup.
+initialise_database()
+
+
+def get_task_or_404(task_id: int) -> Task:
+    with database() as connection:
+        row = connection.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    if row is None:
+        raise TaskNotFoundError(task_id)
+    return task_from_row(row)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
     """Use the assignment's 400 status for malformed or invalid request bodies."""
-    message = exc.errors()[0]["msg"]
-    return JSONResponse(status_code=400, content={"error": message})
+    return JSONResponse(status_code=400, content={"error": exc.errors()[0]["msg"]})
 
 
 @app.exception_handler(TaskNotFoundError)
@@ -90,11 +140,10 @@ async def task_not_found_handler(_: Request, exc: TaskNotFoundError) -> JSONResp
     return JSONResponse(status_code=404, content={"error": f"Task {exc.task_id} not found"})
 
 
-def get_task_or_404(task_id: int) -> Task:
-    for task in tasks:
-        if task.id == task_id:
-            return task
-    raise TaskNotFoundError(task_id)
+@app.on_event("startup")
+def create_database_on_startup() -> None:
+    """Ensure a clean clone creates its database automatically on first run."""
+    initialise_database()
 
 
 @app.get("/", summary="Describe the API")
@@ -116,13 +165,25 @@ def list_tasks(
     limit: Annotated[int | None, Query(ge=1)] = None,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[Task]:
-    """List tasks, optionally filtering by completion status or title."""
-    result = tasks
+    """List tasks, filtering and paginating with SQL when requested."""
+    conditions: list[str] = []
+    parameters: list[object] = []
     if done is not None:
-        result = [task for task in result if task.done == done]
+        conditions.append("done = ?")
+        parameters.append(int(done))
     if search:
-        result = [task for task in result if search.lower() in task.title.lower()]
-    return result[offset:] if limit is None else result[offset : offset + limit]
+        conditions.append("title LIKE ?")
+        parameters.append(f"%{search}%")
+
+    query = "SELECT id, title, done FROM tasks"
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY id LIMIT ? OFFSET ?"
+    parameters.extend([limit if limit is not None else -1, offset])
+
+    with database() as connection:
+        rows = connection.execute(query, parameters).fetchall()
+    return [task_from_row(row) for row in rows]
 
 
 @app.get("/tasks/{task_id}", response_model=Task, summary="Get one task")
@@ -133,40 +194,59 @@ def get_task(task_id: int) -> Task:
 
 @app.post("/tasks", response_model=Task, status_code=status.HTTP_201_CREATED, summary="Create a task")
 def create_task(new_task: TaskCreate) -> Task:
-    """Create a task with the next ID and an initial `done` value of false."""
-    next_id = max((task.id for task in tasks), default=0) + 1
-    task = Task(id=next_id, title=new_task.title, done=False)
-    tasks.append(task)
-    return task
+    """Insert a task and return the ID assigned by SQLite."""
+    with database() as connection:
+        cursor = connection.execute(
+            "INSERT INTO tasks (title, done) VALUES (?, ?)", (new_task.title, 0)
+        )
+        row = connection.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+    return task_from_row(row)
 
 
 @app.put("/tasks/{task_id}", response_model=Task, summary="Update a task")
 def update_task(task_id: int, changes: TaskUpdate) -> Task:
-    """Update a task title and/or completion status."""
-    task = get_task_or_404(task_id)
-    update_data = changes.model_dump(exclude_unset=True)
-    updated = task.model_copy(update=update_data)
-    tasks[tasks.index(task)] = updated
-    return updated
+    """Update the supplied task fields using parameterized SQL."""
+    current = get_task_or_404(task_id)
+    title = changes.title if changes.title is not None else current.title
+    done = changes.done if changes.done is not None else current.done
+    with database() as connection:
+        connection.execute(
+            "UPDATE tasks SET title = ?, done = ? WHERE id = ?",
+            (title, int(done), task_id),
+        )
+        row = connection.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    return task_from_row(row)
 
 
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a task")
 def delete_task(task_id: int) -> Response:
     """Delete a task and return no response body."""
-    task = get_task_or_404(task_id)
-    tasks.remove(task)
+    with database() as connection:
+        cursor = connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    if cursor.rowcount == 0:
+        raise TaskNotFoundError(task_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/stats", summary="Get task statistics")
 def task_stats() -> dict[str, int]:
-    """Count all, completed, and open tasks."""
-    done_count = sum(task.done for task in tasks)
-    return {"total": len(tasks), "done": done_count, "open": len(tasks) - done_count}
+    """Calculate task statistics in SQLite rather than in Python."""
+    with database() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done FROM tasks"
+        ).fetchone()
+    return {"total": row["total"], "done": row["done"], "open": row["total"] - row["done"]}
 
 
 @app.post("/reset", response_model=list[Task], summary="Reset sample data")
 def reset_tasks() -> list[Task]:
-    """Restore the three example tasks for a clean demo."""
-    tasks[:] = [task.model_copy() for task in SEED_TASKS]
-    return tasks
+    """Restore the three example tasks with a single database transaction."""
+    with database() as connection:
+        connection.execute("DELETE FROM tasks")
+        connection.executemany("INSERT INTO tasks (title, done) VALUES (?, ?)", SEED_TASKS)
+        rows = connection.execute("SELECT id, title, done FROM tasks ORDER BY id").fetchall()
+    return [task_from_row(row) for row in rows]
